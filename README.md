@@ -8,9 +8,9 @@ Follow the [official ROS2 Humble installation guide](https://docs.ros.org/en/hum
 
 ---
 
-### Step 2: Install RealSense SDK
+### Step 2: Install RealSense SDK and RealSense ROS2 wrapper
 
-Run the following commands to install RealSense SDK ROS2 packages
+Follow the [ROS Wrapper for Intel(R) RealSense(TM) Cameras](https://github.com/greedypelican/realsense-ros2)
 
 ```bash
 sudo apt update && sudo apt upgrade
@@ -80,5 +80,5 @@ rviz2
 
 Inside RViz:
 - Click `Add` → `By topic`
-- Select `/yolo11/segmentation` to visualize the instance segmentation results.
+- Select `Image` under `/yolo11/segmentation` to visualize the instance segmentation results.
 
