@@ -26,13 +26,13 @@ class Yolo11SegNode(Node):
         self.class_counters = {}
 
         # parameters
-        self.iou_threshold = 0.2
-        self.centroid_threshold = 80
+        self.iou_threshold = 0.01
+        self.centroid_threshold = 720
         self.max_miss_count = 1800 # 1 minute
-        self.smoothing_factor = 0.6
-        self.conf_threshold = 0.6
-        self.depth_diff_threshold = 0.2
-        self.depth_smoothing_factor = 0.7
+        self.smoothing_factor = 0.9
+        self.conf_threshold = 0.7
+        self.depth_diff_threshold = 0.5
+        self.depth_smoothing_factor = 0.9
 
         self.last_depth = None
 
@@ -127,20 +127,29 @@ class Yolo11SegNode(Node):
                 dist = self.euclidean_distance(new_centroid, self.compute_centroid(track['bbox']))
                 depth_diff = abs(new_depth - track['avg_depth'])
                 # IoU is above threshold or distance is below threshold
-                if ((iou_val >= self.iou_threshold or dist <= self.centroid_threshold) and 
-                    depth_diff <= self.depth_diff_threshold and iou_val > best_iou):
-                    best_iou = iou_val
-                    best_track = track_id
+                if ((iou_val >= self.iou_threshold or dist <= self.centroid_threshold) 
+                    and depth_diff <= self.depth_diff_threshold):
+                    if iou_val > best_iou:
+                        best_track = track_id
+                        best_iou = iou_val
+                        
+                    elif math.isclose(iou_val, best_iou, abs_tol=1e-4):
+                        best_current_dist = self.euclidean_distance(
+                            new_centroid, self.compute_centroid(self.tracks[best_track]['bbox'])
+                        ) if best_track is not None else float('inf')
+                        if dist < best_current_dist:
+                            best_track = track_id
 
+                    
             if best_track is not None:
                 assigned_ids[i] = best_track
                 matched_tracks.add(best_track)
-                self.tracks[best_track]['bbox'] = self.smooth_bbox(self.tracks[best_track]['bbox'], new_box)
+                self.tracks[best_track]['bbox'] = self.smooth_bbox(self.tracks[best_track]['bbox'], new_box, alpha=self.smoothing_factor)
                 self.tracks[best_track]['avg_depth'] = (self.depth_smoothing_factor*new_depth + 
                                                         (1-self.depth_smoothing_factor)*self.tracks[best_track]['avg_depth'])
                 self.tracks[best_track]['miss_count'] = 0
-            else:
-                assigned_ids[i] = -1
+
+                self.tracks[best_track]['miss_count'] = 0
 
         # create new tracks for unmatched detections
         for i, tid in enumerate(assigned_ids):
