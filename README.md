@@ -26,10 +26,10 @@ sudo apt install ros-humble-librealsense2* ros-humble-realsense2-*
 Move the `yolo11_segmentation` directory into the `src` directory of your ROS2 workspace
 
 ```bash
-git clone https://github.com/greedypelican/realsense-ros2.git
+git clone https://github.com/greedypelican/ros2-instance-segmentation.git
 ```
 ```bash
-mv ~/realsense-ros2/yolo11_segmentation ~/ros2_ws/src/
+mv ~/ros2-instance-segmentation/yolo11_segmentation ~/ros2_ws/src/
 ```
 
 ---
