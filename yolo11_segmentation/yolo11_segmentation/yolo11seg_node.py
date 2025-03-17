@@ -11,58 +11,43 @@ class Yolo11SegNode(Node):
     def __init__(self):
         super().__init__('yolo11_seg_node')
 
-        self.sub_rgb = self.create_subscription(
-            Image,
-            '/camera/camera/color/image_raw',
-            self.rgb_callback,
-            10
-        )
+        self.sub_rgb = self.create_subscription(Image, '/camera/camera/color/image_raw', self.rgb_callback, 10)
 
-        self.sub_depth = self.create_subscription(
-            Image,
-            '/camera/camera/aligned_depth_to_color/image_raw',
-            self.depth_callback,
-            10
-        )
+        self.sub_depth = self.create_subscription(Image, '/camera/camera/aligned_depth_to_color/image_raw', self.depth_callback, 10)
 
         # semantic map publication
-        self.pub_seg = self.create_publisher(
-            Image,
-            '/yolo11/segmentation',
-            10
-        )
+        self.pub_seg = self.create_publisher(Image, '/yolo11/segmentation', 10)
 
         self.bridge = CvBridge()
 
         self.model = YOLO("yolo11n-seg.pt").to('cuda')
         self.tracks = {}
         self.next_track_id = 0
-
         self.class_counters = {}
 
         # parameters
         self.iou_threshold = 0.2
-        self.centroid_threshold = 320 # half of width
+        self.centroid_threshold = 80
         self.max_miss_count = 1800 # 1 minute
         self.smoothing_factor = 0.6
-        self.conf_threshold = 0.7
+        self.conf_threshold = 0.6
+        self.depth_diff_threshold = 0.2
+        self.depth_smoothing_factor = 0.7
 
         self.last_depth = None
 
         self.get_logger().info("segmentation node initialized")
 
     def depth_callback(self, msg: Image):
-        self.last_depth = self.bridge.imgmsg_to_cv2(msg, 
-                                                    desired_encoding='passthrough')
+        self.last_depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
 
-    def rgb_callback(self, rgb_msg):
-        frame = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding='bgr8')
+    def rgb_callback(self, msg: Image):
+        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
 
         results = self.model.predict(source=frame)
         if not results:
             self.get_logger().warn("no results returned")
             return
-        
         preds =results[0]
 
         if (not hasattr(preds, 'masks') or not hasattr(preds, 'boxes') or
@@ -86,10 +71,24 @@ class Yolo11SegNode(Node):
         masks_np = masks_np[valid_idx]
         classes_np = classes_np[valid_idx]
 
-        num_objects = min(len(boxes_np), len(masks_np))
+        non_empty_indices = []
+        for i in range(len(masks_np)):
+            if np.count_nonzero(masks_np[i] > 0.5) > 0:
+                non_empty_indices.append(i)
+        if not non_empty_indices:
+            return
+        masks_np = masks_np[non_empty_indices]
+        boxes_np = boxes_np[non_empty_indices]
+        classes_np = classes_np[non_empty_indices]
+
+        num_objects = len(non_empty_indices)
+
+        avg_depths = []
+        for i, box in enumerate(boxes_np):
+            avg_depths.append(self.compute_average_depth(self.last_depth, box))        
 
         # match detections
-        assigned_ids = self.assign_track_ids(boxes_np, classes_np)
+        assigned_ids = self.assign_track_ids(boxes_np, classes_np, avg_depths)
 
         height, width = masks_np.shape[1], masks_np.shape[2]
         semantic_map = np.zeros((height, width, 3), dtype=np.uint8)
@@ -110,13 +109,14 @@ class Yolo11SegNode(Node):
         self.get_logger().info(f"published semantic map with {num_objects} objects")
 
     
-    def assign_track_ids(self, new_boxes, new_classes):
+    def assign_track_ids(self, new_boxes, new_classes, new_depths):
         assigned_ids = [-1] * len(new_boxes)
         matched_tracks = set()
 
         for i, new_box in enumerate(new_boxes):
-            new_class = int(new_classes[i])
             new_centroid = self.compute_centroid(new_box)
+            new_class = int(new_classes[i])
+            new_depth = new_depths[i]
             best_track = None
             best_iou = 0.0
 
@@ -125,9 +125,10 @@ class Yolo11SegNode(Node):
                     continue
                 iou_val = self.bbox_iou(new_box, track['bbox'])
                 dist = self.euclidean_distance(new_centroid, self.compute_centroid(track['bbox']))
+                depth_diff = abs(new_depth - track['avg_depth'])
                 # IoU is above threshold or distance is below threshold
-                if ((iou_val >= self.iou_threshold or 
-                     dist <= self.centroid_threshold) and iou_val > best_iou):
+                if ((iou_val >= self.iou_threshold or dist <= self.centroid_threshold) and 
+                    depth_diff <= self.depth_diff_threshold and iou_val > best_iou):
                     best_iou = iou_val
                     best_track = track_id
 
@@ -135,6 +136,8 @@ class Yolo11SegNode(Node):
                 assigned_ids[i] = best_track
                 matched_tracks.add(best_track)
                 self.tracks[best_track]['bbox'] = self.smooth_bbox(self.tracks[best_track]['bbox'], new_box)
+                self.tracks[best_track]['avg_depth'] = (self.depth_smoothing_factor*new_depth + 
+                                                        (1-self.depth_smoothing_factor)*self.tracks[best_track]['avg_depth'])
                 self.tracks[best_track]['miss_count'] = 0
             else:
                 assigned_ids[i] = -1
@@ -142,7 +145,7 @@ class Yolo11SegNode(Node):
         # create new tracks for unmatched detections
         for i, tid in enumerate(assigned_ids):
             if tid == -1:
-                assigned_ids[i] = self.create_new_track(new_boxes[i], new_classes[i])
+                assigned_ids[i] = self.create_new_track(new_boxes[i], new_classes[i], new_depths[i])
                 matched_tracks.add(assigned_ids[i])
 
         # increment miss_count for unmatched tracks
@@ -156,7 +159,7 @@ class Yolo11SegNode(Node):
         return assigned_ids
         
 
-    def create_new_track(self, bbox, class_id):
+    def create_new_track(self, bbox, class_id, avg_depth):
         # assign new track ID, color, label
         new_id = self.next_track_id
         self.next_track_id += 1
@@ -166,11 +169,28 @@ class Yolo11SegNode(Node):
             self.class_counters[class_name] = 1
         instance_num = self.class_counters[class_name]
         self.class_counters[class_name] += 1
-        label = f"{class_name}{instance_num}"
-        self.tracks[new_id] = {'bbox': bbox, 'color': color, 'miss_count': 0, 
-                               'class': class_id, 'label': label}
+        label = f"{class_name}"
+        self.tracks[new_id] = {'bbox': bbox, 'color': color, 'miss_count': 0, 'class': class_id, 'label': label, 'avg_depth': avg_depth}
         return new_id
     
+    @staticmethod
+    def compute_average_depth(depth_img, box):
+        if depth_img is None:
+            return float('inf')
+        h, w = depth_img.shape
+        x1, y1, x2, y2 = box
+        x1 = max(0, int(math.floor(x1)))
+        y1 = max(0, int(math.floor(y1)))
+        x2 = min(w - 1, int(math.floor(x2)))
+        y2 = min(h - 1, int(math.floor(y2)))
+        if x2 <= x1 or y2 <= y1:
+            return float('inf')
+        region = depth_img[y1:y2+1, x1:x2+1].astype(np.float32)
+        valid = region[(region > 0) & (~np.isnan(region))]
+        if len(valid) == 0:
+            return float('inf')
+        return float(np.mean(valid)) / 1000.0
+
     @staticmethod
     def smooth_bbox(old_box, new_box, alpha=0.8):
         # return smoothed box
@@ -195,9 +215,7 @@ class Yolo11SegNode(Node):
         dx = p1[0] - p2[0]
         dy = p1[1] - p2[1]
         dist_sq = dx**2 + dy**2
-        if np.isnan(dist_sq):
-            return float('inf')
-        return math.sqrt(dist_sq)
+        return float('inf') if np.isnan(dist_sq) else math.sqrt(dist_sq)
         
     @staticmethod
     def bbox_iou(boxA, boxB):
