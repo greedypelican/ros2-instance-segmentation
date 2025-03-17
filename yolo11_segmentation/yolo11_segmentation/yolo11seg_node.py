@@ -220,7 +220,7 @@ class YoloAppearanceSortNode(Node):
         self.sub_depth = self.create_subscription(
             Image, '/camera/camera/aligned_depth_to_color/image_raw', self.depth_callback, 10)
         self.pub_seg = self.create_publisher(
-            Image, '/yolo_appearance_sort/segmentation', 10)
+            Image, '/yolo11/segmentation', 10)
         self.bridge = CvBridge()
 
         self.model = YOLO("yolo11n-seg.pt").to('cuda')
