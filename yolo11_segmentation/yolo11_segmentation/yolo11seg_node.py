@@ -13,13 +13,12 @@ import torch
 import torchvision.transforms as T
 from torchvision.models import mobilenet_v2
 
-# Lightweight re‑id network using MobileNetV2
+# Lightweight re-id network using MobileNetV2
 class LightweightReID:
     def __init__(self, device='cuda'):
         self.device = device
-        # Use updated weights argument
         self.model = mobilenet_v2(weights="IMAGENET1K_V1")
-        self.model.classifier = torch.nn.Identity()  # remove classifier for features
+        self.model.classifier = torch.nn.Identity()  # remove classifier
         self.model = self.model.to(self.device)
         self.model.eval()
         self.transform = T.Compose([
@@ -45,7 +44,7 @@ def cosine_similarity(a, b):
         return 0.0
     return np.dot(a, b) / (np.linalg.norm(a)*np.linalg.norm(b))
 
-# Kalman filter based tracker for a single object with long-term appearance memory
+# Kalman filter tracker with long-term appearance memory
 class KalmanBoxTracker:
     count = 0
     def __init__(self, bbox, appearance):
@@ -55,7 +54,7 @@ class KalmanBoxTracker:
         cx = x1 + w/2.0
         cy = y1 + h/2.0
         s = w * h
-        r = w / (h + 1e-5)
+        r = w/(h+1e-5)
         self.x = np.array([cx, cy, s, r, 0, 0, 0], dtype=np.float32)
         self.P = np.eye(7, dtype=np.float32)*10.0
         self.id = KalmanBoxTracker.count
@@ -76,9 +75,9 @@ class KalmanBoxTracker:
                            [0,0,0,1,0,0,0]], dtype=np.float32)
         self.Q = np.eye(7, dtype=np.float32)
         self.R = np.eye(4, dtype=np.float32)*10.0
-        self.appearance = appearance  # 현재 프레임의 feature로 초기화
-        self.appearance_history = [appearance]  # 전체 history를 저장 (메모리처럼 사용)
-        self.depth = None  # depth 정보 저장
+        self.appearance = appearance  # stored feature
+        self.appearance_history = [appearance]  # memory of features
+        self.depth = None
 
     def predict(self):
         self.x = np.dot(self.F, self.x)
@@ -96,7 +95,7 @@ class KalmanBoxTracker:
         cx = x1 + w/2.0
         cy = y1 + h/2.0
         s_meas = w * h
-        r_meas = w / (h + 1e-5)
+        r_meas = w/(h+1e-5)
         z = np.array([cx, cy, s_meas, r_meas], dtype=np.float32)
         s_pred = self.x[2]
         r_pred = self.x[3]
@@ -108,13 +107,12 @@ class KalmanBoxTracker:
         alpha = np.clip(conf, 0.0, 1.0)
         self.x = self.x + alpha * np.dot(K, y_res)
         I = np.eye(7, dtype=np.float32)
-        self.P = np.dot(I - alpha * np.dot(K, self.H), self.P)
-        # 외형 정보 업데이트: 새로운 feature와 기존 메모리 feature들의 평균을 사용
+        self.P = np.dot(I - alpha*np.dot(K, self.H), self.P)
+
+        # Append new appearance and update memory (average over history)
         self.appearance_history.append(appearance)
-        # 메모리 길이를 제한 (예: 최대 20개)
         if len(self.appearance_history) > 20:
             self.appearance_history.pop(0)
-        # 평균을 계산하여 저장 (데이터베이스처럼 오랜 기간 유지)
         self.appearance = np.mean(self.appearance_history, axis=0)
 
     def get_state(self):
@@ -123,17 +121,18 @@ class KalmanBoxTracker:
         r = max(r, 1e-5)
         w = np.sqrt(s*r)
         h = np.sqrt(s/(r+1e-5))
-        return [cx - w/2.0, cy - h/2.0, cx + w/2.0, cy + h/2.0]
+        return [cx-w/2.0, cy-h/2.0, cx+w/2.0, cy+h/2.0]
 
-# Custom SORT tracker with appearance features and depth check
+# SORT tracker with appearance and depth check
 class AppearanceSort:
-    def __init__(self, max_age=30, min_hits=5, iou_threshold=0.3, appearance_weight=0.5, depth_threshold=0.5, reid_model=None):
+    def __init__(self, max_age=30, min_hits=5, iou_threshold=0.3,
+                 appearance_weight=0.5, depth_threshold=0.5, reid_model=None):
         self.max_age = max_age
         self.min_hits = min_hits
         self.iou_threshold = iou_threshold
         self.tracks = []
         self.appearance_weight = appearance_weight
-        self.depth_threshold = depth_threshold  # meters
+        self.depth_threshold = depth_threshold
         self.reid_model = reid_model if reid_model is not None else LightweightReID()
 
     def update(self, detections, frame, depths):
@@ -212,7 +211,7 @@ class AppearanceSort:
         areaB = (boxB[2]-boxB[0])*(boxB[3]-boxB[1])
         return inter / (areaA + areaB - inter + 1e-9)
 
-# ROS2 Node using YOLO and custom SORT with appearance & depth for instance segmentation
+# ROS2 node for instance segmentation with appearance SORT
 class YoloAppearanceSortNode(Node):
     def __init__(self):
         super().__init__('yolo_appearance_sort_node')
@@ -278,7 +277,7 @@ class YoloAppearanceSortNode(Node):
             return
         masks = preds.masks.data.cpu().numpy()
         valid_masks = masks[valid]
-        # Assume detection and mask ordering are aligned
+
         for trk in tracks:
             trk_id = trk[0]
             track_bbox = trk[1:5]
@@ -295,11 +294,11 @@ class YoloAppearanceSortNode(Node):
                 self.track_colors[trk_id] = tuple(np.random.randint(0,256, size=3).tolist())
             color = self.track_colors[trk_id]
             mask = valid_masks[best_idx] > 0.5
-            semantic_map[mask] = color  # instance area with track color
+            semantic_map[mask] = color  # fill with track color
             label = f"{self.model.names[int(detections[best_idx][2])]} | ID: {trk_id}"
             centroid = self.compute_centroid(boxes[best_idx])
             cv2.putText(semantic_map, label, (int(centroid[0]), int(centroid[1])),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 2)  # white text
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 2)
         self.pub_seg.publish(self.bridge.cv2_to_imgmsg(semantic_map, encoding='bgr8'))
         self.get_logger().info(f"published semantic map with {len(tracks)} tracks")
 
